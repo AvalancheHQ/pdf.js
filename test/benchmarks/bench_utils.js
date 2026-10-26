@@ -13,10 +13,10 @@
  * limitations under the License.
  */
 
+import { benchRunOptions, gcBetweenBenchmarks } from "./variance_env.mjs";
 import { setVerbosityLevel, VerbosityLevel } from "../../src/shared/util.js";
 import fs from "fs";
 import { test } from "vitest";
-import { benchRunOptions, gcBetweenBenchmarks } from "./variance_env.mjs";
 import { WorkerMessageHandler } from "../../src/core/worker.js";
 
 // Avoid flooding the benchmark output with `info`/`warn` messages.

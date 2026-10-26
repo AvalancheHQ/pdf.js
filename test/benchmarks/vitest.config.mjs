@@ -17,8 +17,8 @@ import { babelPluginPDFJSPreprocessor } from "../../external/builder/babel-plugi
 import codspeedPlugin from "@codspeed/vitest-plugin";
 import { defineConfig } from "vitest/config";
 import { fileURLToPath } from "url";
-import { transformSync } from "@babel/core";
 import { gcBetweenBenchmarks } from "./variance_env.mjs";
+import { transformSync } from "@babel/core";
 
 const rootDir = fileURLToPath(new URL("../../", import.meta.url));
 const srcDir = `${rootDir}src/`;
@@ -118,9 +118,7 @@ export default defineConfig({
     ],
     // Variance experiment: CodSpeed forks re-run this command once per fork of
     // a benchmark; only report their failures.
-    ...(process.env.CODSPEED_ISOLATED_BENCHMARK
-      ? { reporters: ["dot"] }
-      : {}),
+    ...(process.env.CODSPEED_ISOLATED_BENCHMARK ? { reporters: ["dot"] } : {}),
     benchmark: {
       include: ["test/benchmarks/**/*.bench.js"],
     },
