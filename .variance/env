@@ -1,2 +1,3 @@
 # Variant knobs (KEY=VALUE).
-VARIANT=baseline
+VARIANT=gc_between_rounds
+CODSPEED_WALLTIME_GC_BETWEEN_ROUNDS=true
