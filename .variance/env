@@ -1,2 +1,3 @@
 # Variant knobs (KEY=VALUE).
-VARIANT=baseline
+VARIANT=gc_between_benchmarks
+VARIANCE_GC_BETWEEN_BENCHMARKS=1
