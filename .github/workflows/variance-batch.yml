@@ -1,0 +1,202 @@
+name: Walltime variance batch
+run-name: variance-batch ${{ inputs.batch }} ${{ inputs.variants }}
+
+# Temporary experiment: long-lived workers on the gen2 macro runner pool. Each
+# worker installs the dependencies and the patched plugin once, then runs every
+# selected variant `reps` times, one fresh `codspeed run --skip-upload` per sample.
+# Variant knobs come from the committed `.variance/env` of each variant SHA listed
+# in `.variance/variants.json`. Each saved sample uploads as a separate Local run.
+on:
+  workflow_dispatch:
+    inputs:
+      batch:
+        description: "Batch id, smoke-<id> or measured-<id>"
+        required: true
+      shards:
+        description: "Worker shards (JSON list of positive integers); sample index = (shard-1)*reps+rep"
+        default: "[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25]"
+      reps:
+        description: "Samples of each variant per worker"
+        default: "4"
+      variants:
+        description: "Comma-separated variants (baseline allowed for smoke); baseline2 always runs last"
+        default: "gc_between_benchmarks,gc_between_rounds,forks1,forks3,forks10,forks10_small,baseline2"
+      upload:
+        description: "Upload each sample to staging as an independent Local run (needs secret PDFJS_VARIANCE_STAGING_TOKEN)"
+        type: boolean
+        default: true
+      rep_timeout_minutes:
+        description: "Hard cap of one sample. A sample over the cap is killed and recorded as a failure (exit 124)"
+        default: "120"
+      job_timeout_minutes:
+        description: "Cap of one worker, setup included"
+        default: "470"
+      codspeed_node_ref:
+        description: "Full commit of codspeed-node to build the plugin from"
+        default: "8f03b6eabd7d6d1019449cbfac86bb79a60f704c"
+      runner_version:
+        description: "CodSpeed runner CLI version"
+        default: "5.6.0"
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    name: Worker ${{ matrix.shard }}
+    runs-on: codspeed-macro-x64-ryzen-9950x-ubuntu-24-04
+    timeout-minutes: ${{ fromJSON(inputs.job_timeout_minutes) }}
+    permissions:
+      contents: read
+      id-token: write # The measurement runner requests OIDC even with --skip-upload.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(inputs.shards) }}
+    steps:
+      - name: Validate the inputs
+        env:
+          BATCH: ${{ inputs.batch }}
+          REPS: ${{ inputs.reps }}
+          REP_TIMEOUT_MINUTES: ${{ inputs.rep_timeout_minutes }}
+          NODE_REF: ${{ inputs.codspeed_node_ref }}
+          SHARDS: ${{ inputs.shards }}
+          VARIANTS: ${{ inputs.variants }}
+        run: |
+          [[ "$BATCH" =~ ^(smoke|measured)-[A-Za-z0-9._-]{1,80}$ ]] \
+            || { echo "::error::batch must match (smoke|measured)-<id>, got '$BATCH'"; exit 1; }
+          [[ "$REPS" =~ ^[1-9][0-9]*$ ]] || { echo "::error::reps must be a positive integer"; exit 1; }
+          jq -e 'type == "array" and length > 0 and all(.[]; type == "number" and . > 0 and . == floor) and (unique | length) == length' \
+            <<< "$SHARDS" > /dev/null || { echo "::error::shards must be distinct positive integers"; exit 1; }
+          [[ "$VARIANTS" =~ ^[a-z0-9_]+(,[a-z0-9_]+)*$ ]] || { echo "::error::bad variants '$VARIANTS'"; exit 1; }
+          [[ "$REP_TIMEOUT_MINUTES" =~ ^[1-9][0-9]*$ ]] \
+            || { echo "::error::rep_timeout_minutes must be a positive integer"; exit 1; }
+          [[ "$NODE_REF" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::codspeed_node_ref must be a full commit sha"; exit 1; }
+
+      - name: Check the runner
+        run: |
+          cpu=$(lscpu | sed -n 's/^Model name: *//p')
+          echo "runner: $RUNNER_NAME | host: $(hostname) | cpu: $cpu"
+          [[ "$RUNNER_NAME" == "CodSpeed Runner "* ]] \
+            || { echo "::error::not a CodSpeed dispatcher runner: '$RUNNER_NAME'"; exit 1; }
+          [[ "$cpu" == *"Ryzen 9 9950X"* ]] \
+            || { echo "::error::not a gen2 Ryzen 9 9950X macro runner: '$cpu'"; exit 1; }
+          [[ "$(hostname)" == mr-ryzen-9950x-* ]] \
+            || echo "::warning::unexpected macro runner host name '$(hostname)'"
+          df -h "$RUNNER_TEMP" .
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The variant commits are read with `git show <sha>:.variance/env`.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the variant commits
+        env:
+          VARIANTS: ${{ inputs.variants }}
+        run: |
+          for v in ${VARIANTS//,/ }; do
+            sha=$(jq -r --arg v "$v" '.variants[] | select(.name == $v) | .sha' .variance/variants.json)
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::unknown variant '$v'"; exit 1; }
+            git cat-file -e "$sha^{commit}" || git fetch --no-tags origin "$sha"
+            echo "$v $sha"; git show "$sha:.variance/env"
+            # The variants differ from the harness commit only in knobs, not in benchmark code.
+            git diff --quiet "$sha" HEAD -- test/benchmarks \
+              || echo "::warning::$v ($sha) has different test/benchmarks than $GITHUB_SHA"
+          done
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CodSpeedHQ/codspeed-node
+          ref: ${{ inputs.codspeed_node_ref }}
+          path: .codspeed-node
+          submodules: true
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          package_json_file: .codspeed-node/package.json
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: lts/*
+          cache: "npm"
+
+      - name: Build the CodSpeed plugin
+        working-directory: .codspeed-node
+        env:
+          NODE_REF: ${{ inputs.codspeed_node_ref }}
+        run: |
+          node --version
+          [[ "$(git rev-parse HEAD)" == "$NODE_REF" ]] || { echo "::error::codspeed-node is not at $NODE_REF"; exit 1; }
+          git apply --check ../.variance/codspeed-node-v5-forks.patch
+          git apply ../.variance/codspeed-node-v5-forks.patch
+          pnpm install --frozen-lockfile
+          pnpm turbo run build --filter=@codspeed/vitest-plugin...
+          ls packages/core/prebuilds/linux-x64/*.node
+          mkdir -p ../.plugin
+          (cd packages/core && pnpm pack --pack-destination ../../../.plugin)
+          (cd packages/vitest-plugin && pnpm pack --pack-destination ../../../.plugin)
+          tar -tzf ../.plugin/codspeed-core-*.tgz | grep -E '^package/prebuilds/linux-x64/.*\.node$'
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm install --no-save .plugin/*.tgz
+          [[ "$(find node_modules -path '*@codspeed/core/package.json' | wc -l)" == 1 ]]
+          [[ "$(find node_modules -path '*@codspeed/vitest-plugin/package.json' | wc -l)" == 1 ]]
+          ls node_modules/@codspeed/core/prebuilds/linux-x64/*.node
+          grep -q CODSPEED_WALLTIME_FORKS node_modules/@codspeed/core/dist/*.js
+          grep -rq "recorded no samples" node_modules/@codspeed/vitest-plugin/dist
+          if grep -rq "not supported with Vitest 5" node_modules/@codspeed/vitest-plugin/dist; then
+            echo "::error::the plugin still rejects forks on Vitest 5"; exit 1
+          fi
+          node -e '
+            const core = require("@codspeed/core");
+            if (!core.isBound) { console.error("native addon not bound"); process.exit(1); }
+            console.log("native addon bound on", process.version, "ABI", process.versions.modules);
+          '
+          npx vitest --version
+
+      - name: Install the CodSpeed runner
+        env:
+          RUNNER_VERSION: ${{ inputs.runner_version }}
+        run: |
+          curl -fsSL "https://codspeed.io/v${RUNNER_VERSION}/install.sh" | bash -s -- --quiet
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/codspeed" --version
+
+      - name: Copy the harness out of the checkout
+        # Samples run with each variant commit checked out, which lacks the harness files.
+        run: |
+          mkdir -p "$RUNNER_TEMP/harness"
+          cp .variance/batch.py .variance/variants.json .variance/codspeed-node-v5-forks.patch "$RUNNER_TEMP/harness/"
+
+      - name: Run the samples
+        env:
+          BATCH: ${{ inputs.batch }}
+          SHARD: ${{ matrix.shard }}
+          REPS: ${{ inputs.reps }}
+          VARIANTS: ${{ inputs.variants }}
+          REP_TIMEOUT_MINUTES: ${{ inputs.rep_timeout_minutes }}
+          NODE_REF: ${{ inputs.codspeed_node_ref }}
+          RUNNER_VERSION: ${{ inputs.runner_version }}
+          # Read by batch.py and passed as CODSPEED_TOKEN to the upload process only, never to a measurement.
+          VARIANCE_UPLOAD_TOKEN: ${{ inputs.upload && secrets.PDFJS_VARIANCE_STAGING_TOKEN || '' }}
+          UPLOAD: ${{ inputs.upload }}
+        run: |
+          if [[ "$UPLOAD" == true && -z "$VARIANCE_UPLOAD_TOKEN" ]]; then
+            echo "::error::upload requested but secret PDFJS_VARIANCE_STAGING_TOKEN is empty"; exit 1
+          fi
+          h="$RUNNER_TEMP/harness"
+          python3 "$h/batch.py" --config "$h/variants.json" --patch "$h/codspeed-node-v5-forks.patch" \
+            --batch "$BATCH" --shard "$SHARD" --reps "$REPS" --variants "$VARIANTS" \
+            --out "$RUNNER_TEMP/out" --work "$RUNNER_TEMP/profiles" --timeout-minutes "$REP_TIMEOUT_MINUTES" \
+            --runner-version "$RUNNER_VERSION" --plugin-ref "$NODE_REF"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: batch-${{ inputs.batch }}-${{ github.run_id }}-${{ github.run_attempt }}-shard${{ matrix.shard }}
+          path: ${{ runner.temp }}/out/
+          if-no-files-found: warn

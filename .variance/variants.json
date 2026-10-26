@@ -1,0 +1,66 @@
+{
+  "repo": "AvalancheHQ/pdf.js",
+  "gql": "https://gql.staging.preview.codspeed.io/",
+  "workflow": "variance.yml",
+  "codspeed_node_ref": "8f03b6eabd7d6d1019449cbfac86bb79a60f704c",
+  "runner": "codspeed-macro-x64-ryzen-9950x-ubuntu-24-04",
+  "variants": [
+    {
+      "name": "baseline",
+      "branch": "variance/gen2/baseline",
+      "sha": "3ccc2b3e1892f70071c4459b76cd5370c112f9fe",
+      "parent": null,
+      "change": "repo as-is (execArgv seeds)"
+    },
+    {
+      "name": "gc_between_benchmarks",
+      "branch": "variance/gen2/gc_between_benchmarks",
+      "sha": "a0607e37be8be344a64dca8765ed610df241baf6",
+      "parent": "baseline",
+      "change": "VARIANCE_GC_BETWEEN_BENCHMARKS=1 (global.gc() after each complete benchmark, outside timing; --expose-gc)"
+    },
+    {
+      "name": "gc_between_rounds",
+      "branch": "variance/gen2/gc_between_rounds",
+      "sha": "f669d85e8f0c6cbbb6a0ad639f135435cf44711e",
+      "parent": "baseline",
+      "change": "CODSPEED_WALLTIME_GC_BETWEEN_ROUNDS=true"
+    },
+    {
+      "name": "forks1",
+      "branch": "variance/gen2/forks1",
+      "sha": "ffc26c65646eae1765720d672d976d8e28bd5e31",
+      "parent": "baseline",
+      "change": "CODSPEED_WALLTIME_FORKS=1"
+    },
+    {
+      "name": "forks3",
+      "branch": "variance/gen2/forks3",
+      "sha": "10d3bfff33b1a169e3c76e70f644707e6cc84aa5",
+      "parent": "baseline",
+      "change": "CODSPEED_WALLTIME_FORKS=3"
+    },
+    {
+      "name": "forks10",
+      "branch": "variance/gen2/forks10",
+      "sha": "d37f9ea7c6cf93867e80323aa9a1edad5643a9b2",
+      "parent": "baseline",
+      "change": "CODSPEED_WALLTIME_FORKS=10"
+    },
+    {
+      "name": "forks10_small",
+      "branch": "variance/gen2/forks10_small",
+      "sha": "86f3078f3d7250056e6b43bd49e8f2e03ecf96ed",
+      "parent": "forks10",
+      "change": "CODSPEED_WALLTIME_FORKS=10 + VARIANCE_BENCH_TIME_MS=100 VARIANCE_BENCH_ITERATIONS=7 (per-fork bench time and rounds 1/10 of tinybench 6.2.2 defaults 1000 ms / 64 rounds; ~70 rounds total, ~1 s measured, like baseline)"
+    },
+    {
+      "name": "baseline2",
+      "branch": "variance/gen2/baseline2",
+      "sha": "cab454d40230df0f0ffe451f5b7212e5aca6ea33",
+      "parent": "baseline",
+      "change": "identical to baseline (A/A control, drift)"
+    }
+  ],
+  "runs_per_variant": 100
+}
