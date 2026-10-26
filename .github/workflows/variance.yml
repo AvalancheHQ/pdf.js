@@ -11,11 +11,11 @@ on:
         description: "Batch id, smoke-<id> or measured-<id>: ties the runs of one dispatch together"
         required: true
       jobs:
-        description: "Parallel jobs (JSON list of job numbers)"
-        default: "[1,2,3,4,5,6,7,8,9,10]"
+        description: "One sample job (JSON singleton list); each sample needs a separate workflow"
+        default: "[1]"
       reps:
-        description: "Benchmark runs per job, each uploaded as one CodSpeed run"
-        default: "10"
+        description: "Must be 1: repeated uploads in one workflow merge into one CodSpeed run"
+        default: "1"
       rep_timeout_minutes:
         description: "Hard cap of one benchmark run. A run over the cap is killed and recorded as a failure (exit 124)"
         default: "120"
@@ -55,10 +55,13 @@ jobs:
           REPS: ${{ inputs.reps }}
           REP_TIMEOUT_MINUTES: ${{ inputs.rep_timeout_minutes }}
           NODE_REF: ${{ inputs.codspeed_node_ref }}
+          JOBS: ${{ inputs.jobs }}
         run: |
           [[ "$BATCH" =~ ^(smoke|measured)-[A-Za-z0-9._-]{1,80}$ ]] \
             || { echo "::error::batch must match (smoke|measured)-<id>, got '$BATCH'"; exit 1; }
-          [[ "$REPS" =~ ^[1-9][0-9]*$ ]] || { echo "::error::reps must be a positive integer"; exit 1; }
+          [[ "$REPS" == 1 ]] || { echo "::error::one upload per workflow is required"; exit 1; }
+          jq -e 'type == "array" and length == 1 and (.[0] | type == "number" and . > 0 and . == floor)' \
+            <<< "$JOBS" > /dev/null || { echo "::error::jobs must contain one positive integer"; exit 1; }
           [[ "$REP_TIMEOUT_MINUTES" =~ ^[1-9][0-9]*$ ]] \
             || { echo "::error::rep_timeout_minutes must be a positive integer"; exit 1; }
           [[ "$NODE_REF" =~ ^[0-9a-f]{40}$ ]] \
@@ -187,22 +190,28 @@ jobs:
             echo "::group::rep $rep"
             log="out/logs/rep-$(printf %03d "$rep").log"
             profile="$RUNNER_TEMP/profile-$rep"
+            run_output="$RUNNER_TEMP/run-output-$rep"
+            : > "$run_output"
             started_at=$(date -u +%FT%TZ)
             started=$SECONDS
             # The walltime benchmarks only, with no filter: every bench file runs.
-            timeout --kill-after=60 "${REP_TIMEOUT_MINUTES}m" \
+            GITHUB_OUTPUT="$run_output" timeout --kill-after=60 "${REP_TIMEOUT_MINUTES}m" \
               codspeed run --mode walltime --upload-url "$UPLOAD_URL" --profile-folder "$profile" -- \
               npx vitest bench --run --config test/benchmarks/vitest.config.mjs 2>&1 | tee "$log"
             code=${PIPESTATUS[0]}
             ended_at=$(date -u +%FT%TZ)
-            run_url=$(sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -oE 'https://[^ ]*/runs/[0-9a-f]+' | tail -1)
+            run_id=$(sed -n 's/^run-id=//p' "$run_output")
+            run_url=""
+            if [[ "$run_id" =~ ^[0-9a-f]{24}$ ]]; then
+              run_url="https://app.staging.codspeed.io/AvalancheHQ/pdf.js/runs/$run_id"
+            fi
             # Distinct benchmark URIs of this run, to prove that no benchmark was skipped.
             bench_count=$(cat "$profile"/results/*.json 2>/dev/null | jq -s '[.[].benchmarks[].uri] | unique | length' 2>/dev/null)
             error=""
             if [[ "$code" != 0 ]]; then
               error="codspeed run exited with $code"
             elif [[ -z "$run_url" ]]; then
-              error="no CodSpeed run url in the output"
+              error="no CodSpeed run-id in the runner's step output"
             elif [[ "$bench_count" == 0 ]]; then
               error="no benchmark results"
             fi
