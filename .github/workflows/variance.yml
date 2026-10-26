@@ -1,0 +1,101 @@
+name: Walltime variance
+on:
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: "Parallel jobs (JSON list of job ids)"
+        default: "[1,2,3,4,5,6,7,8,9,10]"
+      reps:
+        description: "Benchmark runs per job, each uploaded as one CodSpeed run"
+        default: "10"
+      codspeed_node_ref:
+        description: "codspeed-node ref used to build the plugin (same for every variant)"
+        default: "8f03b6eabd7d6d1019449cbfac86bb79a60f704c"
+      runner_version:
+        description: "CodSpeed runner CLI version"
+        default: "5.6.0"
+permissions:
+  contents: read
+
+env:
+  UPLOAD_URL: https://api.staging.preview.codspeed.io/upload
+
+jobs:
+  walltime:
+    name: Walltime job ${{ matrix.job }}
+    runs-on: codspeed-macro-x64-ryzen-9950x-ubuntu-24-04
+    permissions:
+      contents: read
+      id-token: write # OIDC authentication with CodSpeed
+    strategy:
+      fail-fast: false
+      matrix:
+        job: ${{ fromJSON(inputs.jobs) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CodSpeedHQ/codspeed-node
+          ref: ${{ inputs.codspeed_node_ref }}
+          path: .codspeed-node
+          submodules: true
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: lts/*
+          cache: "npm"
+
+      - name: Build the CodSpeed plugin
+        working-directory: .codspeed-node
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm turbo run build --filter=@codspeed/vitest-plugin...
+          mkdir -p ../.plugin
+          (cd packages/core && pnpm pack --pack-destination ../../../.plugin)
+          (cd packages/vitest-plugin && pnpm pack --pack-destination ../../../.plugin)
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm install --no-save .plugin/*.tgz
+          grep -q CODSPEED_WALLTIME_FORKS node_modules/@codspeed/core/dist/*.js
+
+      - name: Load the variant knobs
+        run: |
+          # .variance/env holds KEY=VALUE lines; it differs between variant
+          # branches so that every variant gets its own commit hash.
+          grep -E '^[A-Z_]+=' .variance/env >> "$GITHUB_ENV" || true
+          cat .variance/env
+
+      - name: Install the CodSpeed runner
+        run: |
+          curl -fsSL "https://codspeed.io/v${{ inputs.runner_version }}/install.sh" | bash -s -- --quiet
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Run benchmarks
+        run: |
+          set -o pipefail
+          mkdir -p manifest
+          for rep in $(seq "${{ inputs.reps }}"); do
+            echo "::group::rep $rep"
+            codspeed run --mode walltime --upload-url "$UPLOAD_URL" -- \
+              npx vitest bench --run --config test/benchmarks/vitest.config.mjs \
+              2>&1 | tee run.log
+            # The staging API has no runner host field: keep our own record.
+            jq -nc --arg variant "$VARIANT" --arg sha "$GITHUB_SHA" \
+              --arg job "${{ matrix.job }}" --arg rep "$rep" --arg host "$(hostname)" \
+              --arg url "$(grep -oE 'https://[^ ]*/runs/[0-9a-f]+' run.log | tail -1)" \
+              '{variant:$variant, sha:$sha, job:($job|tonumber), rep:($rep|tonumber), host:$host, run_url:$url}' \
+              >> "manifest/${VARIANT}-${{ matrix.job }}.jsonl"
+            echo "::endgroup::"
+          done
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: manifest-${{ env.VARIANT }}-${{ github.run_id }}-${{ matrix.job }}
+          path: manifest/
