@@ -228,6 +228,7 @@ def main():
         sample_dir.mkdir(parents=True)
         profile = args.work / f"profile-{variant}-{index:03d}"
         shutil.rmtree(profile, ignore_errors=True)
+        profile.mkdir(parents=True)
         sha = known[variant]["sha"]
         # The Local upload takes the commit from HEAD: measure and upload with the variant commit checked out.
         subprocess.run(["git", "checkout", "--quiet", "--detach", sha], check=True)
