@@ -1,15 +1,29 @@
 name: Walltime variance
+run-name: variance ${{ inputs.batch }} ${{ github.ref_name }}
+
+# Temporary experiment: the same walltime benchmarks as codspeed.yml, run many
+# times on the gen2 macro runner pool and uploaded to CodSpeed staging. Every
+# variant branch carries this file unchanged and differs only in `.variance/env`.
 on:
   workflow_dispatch:
     inputs:
+      batch:
+        description: "Batch id, smoke-<id> or measured-<id>: ties the runs of one dispatch together"
+        required: true
       jobs:
-        description: "Parallel jobs (JSON list of job ids)"
+        description: "Parallel jobs (JSON list of job numbers)"
         default: "[1,2,3,4,5,6,7,8,9,10]"
       reps:
         description: "Benchmark runs per job, each uploaded as one CodSpeed run"
         default: "10"
+      rep_timeout_minutes:
+        description: "Hard cap of one benchmark run. A run over the cap is killed and recorded as a failure (exit 124)"
+        default: "120"
+      job_timeout_minutes:
+        description: "Cap of one job, setup included. Must exceed reps x the expected run time"
+        default: "1440"
       codspeed_node_ref:
-        description: "codspeed-node ref used to build the plugin (same for every variant)"
+        description: "Full commit of codspeed-node to build the plugin from (the same for every variant)"
         default: "8f03b6eabd7d6d1019449cbfac86bb79a60f704c"
       runner_version:
         description: "CodSpeed runner CLI version"
@@ -23,7 +37,10 @@ env:
 jobs:
   walltime:
     name: Walltime job ${{ matrix.job }}
+    # The gen2 macro runner pool (AMD Ryzen 9 9950X, dispatcher-routed). The
+    # "Check the runner" step fails the job if it ran anywhere else.
     runs-on: codspeed-macro-x64-ryzen-9950x-ubuntu-24-04
+    timeout-minutes: ${{ fromJSON(inputs.job_timeout_minutes) }}
     permissions:
       contents: read
       id-token: write # OIDC authentication with CodSpeed
@@ -32,9 +49,57 @@ jobs:
       matrix:
         job: ${{ fromJSON(inputs.jobs) }}
     steps:
+      - name: Validate the inputs
+        env:
+          BATCH: ${{ inputs.batch }}
+          REPS: ${{ inputs.reps }}
+          REP_TIMEOUT_MINUTES: ${{ inputs.rep_timeout_minutes }}
+          NODE_REF: ${{ inputs.codspeed_node_ref }}
+        run: |
+          [[ "$BATCH" =~ ^(smoke|measured)-[A-Za-z0-9._-]{1,80}$ ]] \
+            || { echo "::error::batch must match (smoke|measured)-<id>, got '$BATCH'"; exit 1; }
+          [[ "$REPS" =~ ^[1-9][0-9]*$ ]] || { echo "::error::reps must be a positive integer"; exit 1; }
+          [[ "$REP_TIMEOUT_MINUTES" =~ ^[1-9][0-9]*$ ]] \
+            || { echo "::error::rep_timeout_minutes must be a positive integer"; exit 1; }
+          [[ "$NODE_REF" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::codspeed_node_ref must be a full commit sha"; exit 1; }
+
+      - name: Check the runner
+        run: |
+          cpu=$(lscpu | sed -n 's/^Model name: *//p')
+          echo "runner: $RUNNER_NAME | host: $(hostname) | cpu: $cpu"
+          [[ "$RUNNER_NAME" == "CodSpeed Runner "* ]] \
+            || { echo "::error::not a CodSpeed dispatcher runner: '$RUNNER_NAME'"; exit 1; }
+          [[ "$cpu" == *"Ryzen 9 9950X"* ]] \
+            || { echo "::error::not a gen2 Ryzen 9 9950X macro runner: '$cpu'"; exit 1; }
+          [[ "$(hostname)" == mr-ryzen-9950x-* ]] \
+            || echo "::warning::unexpected macro runner host name '$(hostname)'"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Load the variant knobs
+        run: |
+          # `.variance/env` holds KEY=VALUE lines and is the only file that
+          # differs between variant branches (so that each variant has its own
+          # commit). Unknown keys fail the job instead of silently doing nothing.
+          : > "$RUNNER_TEMP/knobs.env"
+          while IFS= read -r line; do
+            [[ -z "$line" || "$line" == \#* ]] && continue
+            [[ "$line" =~ ^(VARIANT|CODSPEED_WALLTIME_FORKS|CODSPEED_WALLTIME_GC_BETWEEN_ROUNDS|VARIANCE_[A-Z_]+)=[A-Za-z0-9_.-]*$ ]] \
+              || { echo "::error::unsupported line in .variance/env: '$line'"; exit 1; }
+            echo "$line" >> "$RUNNER_TEMP/knobs.env"
+          done < .variance/env
+          cat "$RUNNER_TEMP/knobs.env" >> "$GITHUB_ENV"
+          cat "$RUNNER_TEMP/knobs.env"
+          variant=$(sed -n 's/^VARIANT=//p' "$RUNNER_TEMP/knobs.env")
+          [[ -n "$variant" ]] || { echo "::error::VARIANT is not set in .variance/env"; exit 1; }
+          if [[ "$GITHUB_REF_NAME" == variance/gen2/* && "$variant" != "${GITHUB_REF_NAME#variance/gen2/}" ]]; then
+            echo "::error::VARIANT '$variant' does not match branch '$GITHUB_REF_NAME'"; exit 1
+          fi
+          jq -Rn '[inputs | select(test("^[A-Z0-9_]+=")) | split("=") | {(.[0]): .[1]}] | add' \
+            "$RUNNER_TEMP/knobs.env" > "$RUNNER_TEMP/knobs.json"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -44,6 +109,10 @@ jobs:
           submodules: true
           persist-credentials: false
 
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          package_json_file: .codspeed-node/package.json
+
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: lts/*
@@ -51,51 +120,127 @@ jobs:
 
       - name: Build the CodSpeed plugin
         working-directory: .codspeed-node
+        env:
+          NODE_REF: ${{ inputs.codspeed_node_ref }}
         run: |
-          corepack enable
+          node --version
+          [[ "$(git rev-parse HEAD)" == "$NODE_REF" ]] || { echo "::error::codspeed-node is not at $NODE_REF"; exit 1; }
+          # Vitest 5 has no forks in the pinned plugin: the same patch is applied for every variant.
+          git apply --check ../.variance/codspeed-node-v5-forks.patch
+          git apply ../.variance/codspeed-node-v5-forks.patch
           pnpm install --frozen-lockfile
           pnpm turbo run build --filter=@codspeed/vitest-plugin...
+          # The native addon is a prebuild, only packed if it was built.
+          ls packages/core/prebuilds/linux-x64/*.node
           mkdir -p ../.plugin
           (cd packages/core && pnpm pack --pack-destination ../../../.plugin)
           (cd packages/vitest-plugin && pnpm pack --pack-destination ../../../.plugin)
+          tar -tzf ../.plugin/codspeed-core-*.tgz | grep -E '^package/prebuilds/linux-x64/.*\.node$'
 
       - name: Install dependencies
         run: |
           npm ci
           npm install --no-save .plugin/*.tgz
+          # Exactly one build of each package, with the addon, the forks and the plugin patch in it.
+          [[ "$(find node_modules -path '*@codspeed/core/package.json' | wc -l)" == 1 ]]
+          [[ "$(find node_modules -path '*@codspeed/vitest-plugin/package.json' | wc -l)" == 1 ]]
+          ls node_modules/@codspeed/core/prebuilds/linux-x64/*.node
           grep -q CODSPEED_WALLTIME_FORKS node_modules/@codspeed/core/dist/*.js
-
-      - name: Load the variant knobs
-        run: |
-          # .variance/env holds KEY=VALUE lines; it differs between variant
-          # branches so that every variant gets its own commit hash.
-          grep -E '^[A-Z_]+=' .variance/env >> "$GITHUB_ENV" || true
-          cat .variance/env
+          grep -rq "recorded no samples" node_modules/@codspeed/vitest-plugin/dist
+          if grep -rq "not supported with Vitest 5" node_modules/@codspeed/vitest-plugin/dist; then
+            echo "::error::the plugin still rejects forks on Vitest 5"; exit 1
+          fi
+          # The native addon must load under the Node.js that runs the benchmarks.
+          node -e '
+            const core = require("@codspeed/core");
+            if (!core.isBound) { console.error("native addon not bound"); process.exit(1); }
+            console.log("native addon bound on", process.version, "ABI", process.versions.modules);
+          '
+          npx vitest --version
 
       - name: Install the CodSpeed runner
+        env:
+          RUNNER_VERSION: ${{ inputs.runner_version }}
         run: |
-          curl -fsSL "https://codspeed.io/v${{ inputs.runner_version }}/install.sh" | bash -s -- --quiet
+          curl -fsSL "https://codspeed.io/v${RUNNER_VERSION}/install.sh" | bash -s -- --quiet
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/codspeed" --version
 
       - name: Run benchmarks
+        # No `-e`: a failing run must not skip its manifest row. The step fails at the end.
+        shell: bash {0}
+        env:
+          BATCH: ${{ inputs.batch }}
+          JOB: ${{ matrix.job }}
+          REPS: ${{ inputs.reps }}
+          REP_TIMEOUT_MINUTES: ${{ inputs.rep_timeout_minutes }}
+          NODE_REF: ${{ inputs.codspeed_node_ref }}
+          RUNNER_VERSION: ${{ inputs.runner_version }}
         run: |
-          set -o pipefail
-          mkdir -p manifest
-          for rep in $(seq "${{ inputs.reps }}"); do
+          # The staging API has no runner host field: keep our own record of where each run was.
+          mkdir -p out/manifest out/logs
+          manifest="out/manifest/${VARIANT}-${JOB}.jsonl"
+          cpu=$(lscpu | sed -n 's/^Model name: *//p')
+          patch_sha=$(sha256sum .variance/codspeed-node-v5-forks.patch | cut -d' ' -f1)
+          failed=0
+          for rep in $(seq "$REPS"); do
             echo "::group::rep $rep"
-            codspeed run --mode walltime --upload-url "$UPLOAD_URL" -- \
-              npx vitest bench --run --config test/benchmarks/vitest.config.mjs \
-              2>&1 | tee run.log
-            # The staging API has no runner host field: keep our own record.
-            jq -nc --arg variant "$VARIANT" --arg sha "$GITHUB_SHA" \
-              --arg job "${{ matrix.job }}" --arg rep "$rep" --arg host "$(hostname)" \
-              --arg url "$(grep -oE 'https://[^ ]*/runs/[0-9a-f]+' run.log | tail -1)" \
-              '{variant:$variant, sha:$sha, job:($job|tonumber), rep:($rep|tonumber), host:$host, run_url:$url}' \
-              >> "manifest/${VARIANT}-${{ matrix.job }}.jsonl"
+            log="out/logs/rep-$(printf %03d "$rep").log"
+            profile="$RUNNER_TEMP/profile-$rep"
+            started_at=$(date -u +%FT%TZ)
+            started=$SECONDS
+            # The walltime benchmarks only, with no filter: every bench file runs.
+            timeout --kill-after=60 "${REP_TIMEOUT_MINUTES}m" \
+              codspeed run --mode walltime --upload-url "$UPLOAD_URL" --profile-folder "$profile" -- \
+              npx vitest bench --run --config test/benchmarks/vitest.config.mjs 2>&1 | tee "$log"
+            code=${PIPESTATUS[0]}
+            ended_at=$(date -u +%FT%TZ)
+            run_url=$(sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -oE 'https://[^ ]*/runs/[0-9a-f]+' | tail -1)
+            # Distinct benchmark URIs of this run, to prove that no benchmark was skipped.
+            bench_count=$(cat "$profile"/results/*.json 2>/dev/null | jq -s '[.[].benchmarks[].uri] | unique | length' 2>/dev/null)
+            error=""
+            if [[ "$code" != 0 ]]; then
+              error="codspeed run exited with $code"
+            elif [[ -z "$run_url" ]]; then
+              error="no CodSpeed run url in the output"
+            elif [[ "$bench_count" == 0 ]]; then
+              error="no benchmark results"
+            fi
+            [[ -n "$error" ]] && { failed=$((failed + 1)); echo "::error::rep $rep: $error"; }
+            jq -nc \
+              --arg batch "$BATCH" --arg variant "$VARIANT" --arg sha "$GITHUB_SHA" \
+              --argjson gh_run_id "$GITHUB_RUN_ID" --argjson gh_run_attempt "$GITHUB_RUN_ATTEMPT" \
+              --argjson job "$JOB" --argjson rep "$rep" \
+              --arg host "$(hostname)" --arg runner_name "$RUNNER_NAME" --arg cpu_model "$cpu" \
+              --arg node_version "$(node --version)" --arg runner_version "$RUNNER_VERSION" \
+              --arg plugin_ref "$NODE_REF" --arg plugin_patch_sha256 "$patch_sha" \
+              --arg run_url "$run_url" --argjson codspeed_exit "$code" \
+              --arg started_at "$started_at" --arg ended_at "$ended_at" \
+              --argjson rep_seconds "$((SECONDS - started))" \
+              --argjson bench_count "${bench_count:-null}" --arg error "$error" \
+              --slurpfile knobs "$RUNNER_TEMP/knobs.json" \
+              '{batch:$batch, variant:$variant, sha:$sha, gh_run_id:$gh_run_id, gh_run_attempt:$gh_run_attempt,
+                job:$job, rep:$rep, host:$host, runner_name:$runner_name, cpu_model:$cpu_model,
+                node_version:$node_version, runner_version:$runner_version, plugin_ref:$plugin_ref,
+                plugin_patch_sha256:$plugin_patch_sha256, run_url:$run_url, codspeed_exit:$codspeed_exit,
+                started_at:$started_at, ended_at:$ended_at, rep_seconds:$rep_seconds,
+                bench_count:$bench_count, error:$error, knobs:$knobs[0]}' >> "$manifest"
+            rm -rf "$profile"
             echo "::endgroup::"
           done
+          echo "$failed of $REPS runs failed"
+          [[ "$failed" == 0 ]]
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
         with:
-          name: manifest-${{ env.VARIANT }}-${{ github.run_id }}-${{ matrix.job }}
-          path: manifest/
+          name: manifest-${{ env.VARIANT }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.job }}
+          path: out/manifest/
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: logs-${{ env.VARIANT }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.job }}
+          path: out/logs/
+          if-no-files-found: warn

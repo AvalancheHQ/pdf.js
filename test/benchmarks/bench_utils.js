@@ -16,6 +16,7 @@
 import { setVerbosityLevel, VerbosityLevel } from "../../src/shared/util.js";
 import fs from "fs";
 import { test } from "vitest";
+import { benchRunOptions, gcBetweenBenchmarks } from "./variance_env.mjs";
 import { WorkerMessageHandler } from "../../src/core/worker.js";
 
 // Avoid flooding the benchmark output with `info`/`warn` messages.
@@ -105,7 +106,17 @@ function buildGetDocumentParams(data) {
 function benchmark(name, fn) {
   // Wrapper function to reduce boilerplate for the individual benchmarks.
   test(name, async ({ bench }) => {
-    await bench(name, fn).run();
+    if (gcBetweenBenchmarks && typeof globalThis.gc !== "function") {
+      throw new Error(
+        "VARIANCE_GC_BETWEEN_BENCHMARKS needs the `--expose-gc` V8 flag"
+      );
+    }
+    await bench(name, fn).run(benchRunOptions);
+    if (gcBetweenBenchmarks) {
+      // After the complete benchmark, so it starts the next one on a collected
+      // heap without being part of any measurement.
+      globalThis.gc();
+    }
   });
 }
 

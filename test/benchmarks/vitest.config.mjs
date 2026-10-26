@@ -18,6 +18,7 @@ import codspeedPlugin from "@codspeed/vitest-plugin";
 import { defineConfig } from "vitest/config";
 import { fileURLToPath } from "url";
 import { transformSync } from "@babel/core";
+import { gcBetweenBenchmarks } from "./variance_env.mjs";
 
 const rootDir = fileURLToPath(new URL("../../", import.meta.url));
 const srcDir = `${rootDir}src/`;
@@ -112,7 +113,14 @@ export default defineConfig({
       "--always-sparkplug",
       "--hash-seed=1",
       "--random-seed=1",
+      // Variance experiment: needed to run `gc()` between benchmarks.
+      ...(gcBetweenBenchmarks ? ["--expose-gc"] : []),
     ],
+    // Variance experiment: CodSpeed forks re-run this command once per fork of
+    // a benchmark; only report their failures.
+    ...(process.env.CODSPEED_ISOLATED_BENCHMARK
+      ? { reporters: ["dot"] }
+      : {}),
     benchmark: {
       include: ["test/benchmarks/**/*.bench.js"],
     },

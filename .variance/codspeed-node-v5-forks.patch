@@ -1,0 +1,378 @@
+diff --git a/packages/vitest-plugin/src/__tests__/v5-walltime.test.ts b/packages/vitest-plugin/src/__tests__/v5-walltime.test.ts
+index a6838a5..9654e4a 100644
+--- a/packages/vitest-plugin/src/__tests__/v5-walltime.test.ts
++++ b/packages/vitest-plugin/src/__tests__/v5-walltime.test.ts
+@@ -5,8 +5,9 @@ import type {
+   BenchRegistrationInput,
+   BenchRunOptions,
+ } from "vitest";
+-import { afterEach, describe, expect, it, vi } from "vitest";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+ import type * as Instrument from "../instrument";
++import { writeAndLogWalltimeResults } from "../instrument";
+ import provider from "../v5/provider";
+ 
+ const coreMocks = vi.hoisted(() => ({
+@@ -22,6 +23,14 @@ const coreMocks = vi.hoisted(() => ({
+   setupCore: vi.fn(),
+   teardownCore: vi.fn(),
+   collectGarbage: vi.fn(),
++  isFork: vi.fn(() => false),
++  runForks: vi.fn(),
++  writeForkSamples: vi.fn(),
++  Isolation: {
++    current: vi.fn((): { shouldRun: (uri: string) => boolean } => ({
++      shouldRun: () => true,
++    })),
++  },
+ }));
+ 
+ vi.mock("@codspeed/core", async (importOriginal) => {
+@@ -60,6 +69,10 @@ describe("v5 walltime provider", () => {
+     vi.unstubAllEnvs();
+     vi.clearAllMocks();
+   });
++  beforeEach(() => {
++    coreMocks.isFork.mockReturnValue(false);
++    coreMocks.Isolation.current.mockReturnValue({ shouldRun: () => true });
++  });
+ 
+   it("collects garbage after the user's beforeEach, before every round", async () => {
+     vi.stubEnv("CODSPEED_WALLTIME_GC_BETWEEN_ROUNDS", "true");
+@@ -90,15 +103,81 @@ describe("v5 walltime provider", () => {
+     expect(coreMocks.collectGarbage).not.toHaveBeenCalled();
+   });
+ 
+-  it("rejects forks", async () => {
++  it("runs the forks of every benchmark and merges their samples, without measuring itself", async () => {
+     vi.stubEnv("CODSPEED_WALLTIME_FORKS", "2");
++    vi.stubEnv(
++      "CODSPEED_ISOLATION_COMMAND",
++      JSON.stringify(["node", "vitest"]),
++    );
++    const fn = vi.fn();
++    const commands: string[] = [];
++    coreMocks.runForks.mockImplementation(() => {
++      commands.push(process.env.CODSPEED_ISOLATION_COMMAND!);
++      return [3, 1, 2, 4];
++    });
++
++    const results = await run([
++      fromPartial<BenchRegistrationInput>({ name: "bench", fn }),
++    ]);
+ 
+-    await expect(
+-      run([
+-        fromPartial<BenchRegistrationInput>({ name: "bench", fn: () => {} }),
+-      ]),
+-    ).rejects.toThrow(
+-      "[CodSpeed] CODSPEED_WALLTIME_FORKS is not supported with Vitest 5 yet",
++    // No warmup nor measured loop in the parent: the forks do both.
++    expect(fn).not.toHaveBeenCalled();
++    expect(coreMocks.InstrumentHooks.startBenchmark).not.toHaveBeenCalled();
++    expect(coreMocks.runForks).toHaveBeenCalledExactlyOnceWith(
++      "a.bench.ts::suite::test::bench",
++      2,
+     );
++    // The forks only collect the file of their benchmark, then the command is restored.
++    expect(commands).toEqual([
++      JSON.stringify(["node", "vitest", "/repo/a.bench.ts"]),
++    ]);
++    expect(process.env.CODSPEED_ISOLATION_COMMAND).toBe(
++      JSON.stringify(["node", "vitest"]),
++    );
++    expect(vi.mocked(writeAndLogWalltimeResults)).toHaveBeenCalledOnce();
++    const [benchmarks] = vi.mocked(writeAndLogWalltimeResults).mock.calls[0];
++    expect(benchmarks).toHaveLength(1);
++    expect(benchmarks[0].uri).toBe("a.bench.ts::suite::test::bench");
++    expect(benchmarks[0].stats.rounds).toBe(4);
++    expect(benchmarks[0].stats.min_ns).toBe(1e6);
++    expect(results[0].latency.samplesCount).toBe(4);
++  });
++
++  it("measures only its benchmark in a fork and hands the samples to the parent", async () => {
++    vi.stubEnv("CODSPEED_WALLTIME_FORKS", "2");
++    coreMocks.isFork.mockReturnValue(true);
++    coreMocks.Isolation.current.mockReturnValue({
++      shouldRun: (uri: string) => uri === "a.bench.ts::suite::test::bench",
++    });
++    const other = vi.fn();
++
++    const results = await run([
++      fromPartial<BenchRegistrationInput>({ name: "bench", fn: () => {} }),
++      fromPartial<BenchRegistrationInput>({ name: "other", fn: other }),
++    ]);
++
++    expect(other).not.toHaveBeenCalled();
++    expect(coreMocks.runForks).not.toHaveBeenCalled();
++    expect(coreMocks.writeForkSamples).toHaveBeenCalledOnce();
++    expect(
++      coreMocks.writeForkSamples.mock.calls[0][0].length,
++    ).toBeGreaterThanOrEqual(ITERATIONS);
++    // The parent writes the results, not the fork.
++    expect(vi.mocked(writeAndLogWalltimeResults)).not.toHaveBeenCalled();
++    expect(results.map((result) => result.name)).toEqual(["bench", "other"]);
++  });
++
++  it("returns zeroed results from a fork that does not own the benchmark", async () => {
++    coreMocks.isFork.mockReturnValue(true);
++    coreMocks.Isolation.current.mockReturnValue({ shouldRun: () => false });
++    const fn = vi.fn();
++
++    const results = await run([
++      fromPartial<BenchRegistrationInput>({ name: "bench", fn }),
++    ]);
++
++    expect(fn).not.toHaveBeenCalled();
++    expect(coreMocks.writeForkSamples).not.toHaveBeenCalled();
++    expect(results.map((result) => result.name)).toEqual(["bench"]);
+   });
+ });
+diff --git a/packages/vitest-plugin/src/v5/provider.ts b/packages/vitest-plugin/src/v5/provider.ts
+index 3f79350..25a2d74 100644
+--- a/packages/vitest-plugin/src/v5/provider.ts
++++ b/packages/vitest-plugin/src/v5/provider.ts
+@@ -3,15 +3,18 @@ import {
+   getInstrumentMode,
+   getWalltimeForks,
+   InstrumentHooks,
++  isFork,
+   isGcBetweenRoundsEnabled,
+   Isolation,
++  ISOLATION_COMMAND_ENV,
+   optimizeFunction,
+   optimizeFunctionSync,
++  runForks,
+   setupCore,
+   teardownCore,
+-  WALLTIME_FORKS_ENV,
+   wrapWithRootFrame,
+   wrapWithRootFrameSync,
++  writeForkSamples,
+   type Benchmark,
+ } from "@codspeed/core";
+ import { createRequire } from "module";
+@@ -236,9 +239,23 @@ async function runWalltime(
+   getUri: (name: string) => string,
+   test: BenchmarkGroup["test"],
+ ): Promise<BenchResult[]> {
+-  if (getWalltimeForks() !== undefined) {
++  const forks = getWalltimeForks();
++  if (forks !== undefined && !isFork()) {
++    return runWalltimeForks(registrations, options, getUri, test, forks);
++  }
++
++  // A fork measures only the benchmark its parent asked for. Like in analysis
++  // mode, the other benchmarks of the run get zeroed results.
++  const isolation = Isolation.current();
++  const measured = registrations.filter(({ name }) =>
++    isolation.shouldRun(getUri(name)),
++  );
++  if (isFork() && measured.length !== 1) {
++    if (measured.length === 0) {
++      return registrations.map(({ name }) => analysisResult(name));
++    }
+     throw new Error(
+-      `[CodSpeed] ${WALLTIME_FORKS_ENV} is not supported with Vitest 5 yet`,
++      `[CodSpeed] ${measured.length} benchmarks of one group share the URI the fork must measure`,
+     );
+   }
+ 
+@@ -251,7 +268,7 @@ async function runWalltime(
+     retainSamples: true,
+   });
+ 
+-  for (const { name, fn, fnOpts } of registrations) {
++  for (const { name, fn, fnOpts } of measured) {
+     // tinybench v6 keeps `fn` private, so the root frame is baked in here
+     bench.add(
+       name,
+@@ -272,9 +289,18 @@ async function runWalltime(
+   const tasks = await bench.run();
+ 
+   throwOnErroredTasks(tasks);
+-  collectWalltimeResults(bench, getUri);
++  const results = tasks.map(tinybenchTaskToBenchResult);
++  if (!isFork()) {
++    collectWalltimeResults(bench, getUri);
++    return results;
++  }
+ 
+-  return tasks.map(tinybenchTaskToBenchResult);
++  // The parent merges the samples of all its forks and writes the results.
++  writeForkSamples(samplesOf(tasks[0]));
++  return registrations.map(
++    ({ name }) =>
++      results.find((result) => result.name === name) ?? analysisResult(name),
++  );
+ }
+ 
+ /** Fail the test like Vitest's own provider does, instead of returning empty results. */
+@@ -294,14 +320,7 @@ function collectWalltimeResults(
+   bench: TinybenchWithTasks,
+   getUri: (name: string) => string,
+ ): void {
+-  const options: TinybenchOptions = {
+-    time: bench.time,
+-    iterations: bench.iterations,
+-    // A bench with warmup turned off keeps its warmup timings, so they'd
+-    // otherwise be reported as if a warmup had run.
+-    warmupTime: bench.warmup ? bench.warmupTime : 0,
+-    warmupIterations: bench.warmup ? bench.warmupIterations : 0,
+-  };
++  const options = tinybenchOptionsOf(bench);
+   const benchmarks: Benchmark[] = [];
+   for (const task of bench.tasks) {
+     if (task.result?.state !== "completed") continue;
+@@ -330,4 +349,151 @@ function tinybenchTaskToBenchResult(task: TinybenchTask): BenchResult {
+   };
+ }
+ 
++/** The options a bench ran with, as tinybench resolved them (defaults included). */
++function tinybenchOptionsOf(bench: TinybenchWithTasks): TinybenchOptions {
++  return {
++    time: bench.time,
++    iterations: bench.iterations,
++    // A bench with warmup turned off keeps its warmup timings, so they'd
++    // otherwise be reported as if a warmup had run.
++    warmupTime: bench.warmup ? bench.warmupTime : 0,
++    warmupIterations: bench.warmup ? bench.warmupIterations : 0,
++  };
++}
++
++function samplesOf(task: TinybenchTask): number[] {
++  const samples = task.result?.latency.samples;
++  if (samples === undefined || samples.length === 0) {
++    throw new Error(`[CodSpeed] "${task.name}" recorded no samples`);
++  }
++  // Copied: the parent writes them out, tinybench keeps its own array.
++  return [...samples];
++}
++
++/**
++ * Forks parent. Runs each benchmark in `forks` fresh processes, one after the
++ * other, and reports the rounds of all of them together. The parent runs
++ * neither warmup nor measurement: every fork warms up and measures the
++ * benchmark itself, with the options given to `bench().run()`.
++ */
++async function runWalltimeForks(
++  registrations: BenchRegistrationInput[],
++  options: BenchRunOptions | undefined,
++  getUri: (name: string) => string,
++  test: BenchmarkGroup["test"],
++  forks: number,
++): Promise<BenchResult[]> {
++  const filepath = test.file?.filepath;
++  if (!filepath) {
++    throw new Error("[CodSpeed] could not resolve the running benchmark file");
++  }
++  const { Bench } = await importHostTinybench();
++  // Never run: it only resolves tinybench's options, defaults included.
++  const resolved = tinybenchOptionsOf(
++    new Bench({ signal: test.context.signal, ...options, retainSamples: true }),
++  );
++
++  const benchmarks: Benchmark[] = [];
++  const results: BenchResult[] = [];
++  for (const { name } of registrations) {
++    const uri = getUri(name);
++    const samples = runForksOfFile(uri, forks, filepath);
++    if (samples.length === 0) {
++      throw new Error(`[CodSpeed] the forks of "${uri}" recorded no samples`);
++    }
++    const latency = statisticsOf(samples);
++    const totalTime = samples.reduce((sum, sample) => sum + sample, 0);
++    const benchmark = tinybenchTaskToBenchmark(
++      { name, result: { state: "completed", totalTime, latency } },
++      uri,
++      resolved,
++    );
++    if (benchmark) {
++      benchmarks.push(benchmark);
++    }
++    results.push({
++      ...analysisResult(name),
++      latency,
++      throughput: statisticsOf(samples.map((sample) => 1000 / sample)),
++      period: latency.mean,
++      totalTime,
++    });
++  }
++
++  writeAndLogWalltimeResults(benchmarks);
++  return results;
++}
++
++/**
++ * `runForks` re-runs the recorded benchmark command for every fork. Every fork
++ * only needs the file of its benchmark, so that is the one it is told to load
++ * instead of collecting all benchmark files for a single benchmark.
++ */
++function runForksOfFile(
++  uri: string,
++  forks: number,
++  filepath: string,
++): number[] {
++  const recorded = process.env[ISOLATION_COMMAND_ENV];
++  if (recorded === undefined) {
++    throw new Error(`[CodSpeed] ${ISOLATION_COMMAND_ENV} is not set`);
++  }
++  const command = JSON.parse(recorded) as string[];
++  process.env[ISOLATION_COMMAND_ENV] = JSON.stringify([...command, filepath]);
++  try {
++    return runForks(uri, forks);
++  } finally {
++    process.env[ISOLATION_COMMAND_ENV] = recorded;
++  }
++}
++
++/**
++ * Latency statistics of `samples` (milliseconds) for Vitest's reporter. Only
++ * the reporter reads the derived fields: CodSpeed's results come from the raw
++ * samples.
++ */
++function statisticsOf(samples: number[]): BenchStatistics {
++  const sorted = [...samples].sort((a, b) => a - b);
++  const count = sorted.length;
++  const mean = sorted.reduce((sum, sample) => sum + sample, 0) / count;
++  const df = count - 1;
++  const variance =
++    df > 0
++      ? sorted.reduce((sum, sample) => sum + (sample - mean) ** 2, 0) / df
++      : 0;
++  const sd = Math.sqrt(variance);
++  const sem = sd / Math.sqrt(count);
++  // Two-sided 95% Student's t critical value, approximated from above.
++  const critical = df > 0 ? 1.96 + 2.4 / df : 0;
++  const moe = critical * sem;
++  const percentile = (p: number) =>
++    sorted[Math.min(count - 1, Math.floor(p * count))];
++  const median = percentile(0.5);
++  const deviations = sorted
++    .map((sample) => Math.abs(sample - median))
++    .sort((a, b) => a - b);
++  return {
++    aad:
++      sorted.reduce((sum, sample) => sum + Math.abs(sample - mean), 0) / count,
++    critical,
++    df,
++    mad: deviations[Math.floor(count / 2)],
++    max: sorted[count - 1],
++    mean,
++    min: sorted[0],
++    moe,
++    p50: median,
++    p75: percentile(0.75),
++    p99: percentile(0.99),
++    p995: percentile(0.995),
++    p999: percentile(0.999),
++    rme: mean === 0 ? Infinity : (100 * moe) / Math.abs(mean),
++    samples: sorted as BenchStatistics["samples"],
++    samplesCount: count,
++    sd,
++    sem,
++    variance,
++  };
++}
++
+ export default provider;
