@@ -104,6 +104,8 @@ export default defineConfig({
   },
   test: {
     include: [],
+    // Allow ten serial forks, including each child process's module setup.
+    testTimeout: 600_000,
     // Compile WebAssembly with TurboFan only to avoid timing variation from
     // background tier-up from Liftoff.
     // Compile JavaScript with Sparkplug on first call to avoid delayed batches.
