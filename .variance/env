@@ -1,2 +1,3 @@
 # Variant knobs (KEY=VALUE).
-VARIANT=baseline
+VARIANT=forks1
+CODSPEED_WALLTIME_FORKS=1
