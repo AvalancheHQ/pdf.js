@@ -304,6 +304,8 @@ def main():
             f.write(json.dumps(row) + "\n")
             f.flush()
             os.fsync(f.fileno())
+        print(json.dumps({k: v for k, v in row.items()
+                          if k not in {"dropped_profile_files", "removed_tmp_files"}}), flush=True)
         print("::endgroup::", flush=True)
 
     subprocess.run(["git", "checkout", "--quiet", "--detach", harness_sha], check=False)
