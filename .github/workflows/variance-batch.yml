@@ -27,10 +27,10 @@ on:
         default: true
       rep_timeout_minutes:
         description: "Hard cap of one sample. A sample over the cap is killed and recorded as a failure (exit 124)"
-        default: "120"
+        default: "15"
       job_timeout_minutes:
         description: "Cap of one worker, setup included; must stay below the runner lifetime"
-        default: "330"
+        default: "55"
       codspeed_node_ref:
         description: "Full commit of codspeed-node to build the plugin from"
         default: "8f03b6eabd7d6d1019449cbfac86bb79a60f704c"

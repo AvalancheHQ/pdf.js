@@ -49,8 +49,8 @@ function parsePositiveInteger(name) {
 const gcBetweenBenchmarks = parseFlag("VARIANCE_GC_BETWEEN_BENCHMARKS");
 
 // Per `bench().run()` minimums (tinybench: both must be reached), replacing
-// tinybench's defaults of 1000 ms and 64 rounds. With forks, they apply to
-// each fork.
+// tinybench's defaults of 1000 ms / 64 measured rounds and 250 ms / 16
+// warmup iterations. With forks, they apply to each fork.
 const benchRunOptions = {};
 const benchTimeMs = parsePositiveInteger("VARIANCE_BENCH_TIME_MS");
 if (benchTimeMs !== undefined) {
@@ -59,6 +59,16 @@ if (benchTimeMs !== undefined) {
 const benchIterations = parsePositiveInteger("VARIANCE_BENCH_ITERATIONS");
 if (benchIterations !== undefined) {
   benchRunOptions.iterations = benchIterations;
+}
+const benchWarmupTimeMs = parsePositiveInteger("VARIANCE_BENCH_WARMUP_TIME_MS");
+if (benchWarmupTimeMs !== undefined) {
+  benchRunOptions.warmupTime = benchWarmupTimeMs;
+}
+const benchWarmupIterations = parsePositiveInteger(
+  "VARIANCE_BENCH_WARMUP_ITERATIONS"
+);
+if (benchWarmupIterations !== undefined) {
+  benchRunOptions.warmupIterations = benchWarmupIterations;
 }
 
 export { benchRunOptions, gcBetweenBenchmarks };
