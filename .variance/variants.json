@@ -6,6 +6,20 @@
   "runner": "codspeed-macro-x64-ryzen-9950x-ubuntu-24-04",
   "variants": [
     {
+      "name": "baseline_warmup3",
+      "branch": "variance/gen2/baseline_warmup3",
+      "sha": "a2ad29e1becb8846ce0a0cb7e7cd6fbdceccdb8d",
+      "parent": "baseline",
+      "change": "no forks; warmup 750 ms / 48 iterations; measurement 1000 ms / 64 rounds"
+    },
+    {
+      "name": "baseline_run3",
+      "branch": "variance/gen2/baseline_run3",
+      "sha": "bde2a67be65cc691b3f9d93be3cd661db26fe500",
+      "parent": "baseline",
+      "change": "no forks; warmup 250 ms / 16 iterations; measurement 3000 ms / 192 rounds"
+    },
+    {
       "name": "baseline",
       "branch": "variance/gen2/baseline",
       "sha": "3ccc2b3e1892f70071c4459b76cd5370c112f9fe",
