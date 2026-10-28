@@ -74,6 +74,34 @@
       "sha": "cab454d40230df0f0ffe451f5b7212e5aca6ea33",
       "parent": "baseline",
       "change": "identical to baseline (A/A control, drift)"
+    },
+    {
+      "name": "budget_f3_half",
+      "branch": "variance/gen2/budget_f3_half",
+      "sha": "d561a34259b51e5b9d6cc0a751972abf405c6e46",
+      "parent": "forks1",
+      "change": "3 forks; measurement 500 ms / 32 rounds, warmup 125 ms / 8 per fork"
+    },
+    {
+      "name": "budget_f3_quarter",
+      "branch": "variance/gen2/budget_f3_quarter",
+      "sha": "868931667893b548b10c8aa045a9ca5c717843e0",
+      "parent": "forks1",
+      "change": "3 forks; measurement 250 ms / 16 rounds, warmup 63 ms / 4 per fork"
+    },
+    {
+      "name": "budget_f3_eighth",
+      "branch": "variance/gen2/budget_f3_eighth",
+      "sha": "31f8705858ae587a468681f66b21e96f674abc40",
+      "parent": "forks1",
+      "change": "3 forks; measurement 125 ms / 8 rounds, warmup 32 ms / 2 per fork"
+    },
+    {
+      "name": "budget_f1_full",
+      "branch": "variance/gen2/budget_f1_full",
+      "sha": "9753882b95fc7a794ce17d578758646f6de0ac27",
+      "parent": "forks1",
+      "change": "1 fork, default budget (anchor; same knobs as forks1)"
     }
   ],
   "runs_per_variant": 100

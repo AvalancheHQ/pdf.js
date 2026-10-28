@@ -37,6 +37,12 @@ on:
       runner_version:
         description: "CodSpeed runner CLI version"
         default: "5.6.0"
+      max_parallel:
+        description: "Workers running at the same time"
+        default: "10"
+      node_version:
+        description: "Node.js version of the samples"
+        default: "lts/*"
 permissions:
   contents: read
 
@@ -50,6 +56,7 @@ jobs:
       id-token: write # The measurement runner requests OIDC even with --skip-upload.
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
       matrix:
         shard: ${{ fromJSON(inputs.shards) }}
     steps:
@@ -119,7 +126,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: lts/*
+          node-version: ${{ inputs.node_version }}
           cache: "npm"
 
       - name: Build the CodSpeed plugin
